@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace KartDriftLocal
 {
@@ -19,6 +20,53 @@ namespace KartDriftLocal
         static readonly string[] LoginFields = ("itemPresetOn itemEquipmentOn itemPresetSlotVector ownKartsUpgradeInfo optionSetting licenseData tutorialData liveryVector liveryStickerVector emblemItemIdOn customProperties crossPlayEnabled autoReady quickMatchData ownCostumeAttrInfo rankMatchTierData balloon riderName").Split(' ');
         static readonly string[] VehicleSlots = "PartBack PartFront PartSide PartHandle PartPlate PartWheel KartAura KartBooster SkidMark".Split(' ');
         internal static Action<string> Log;
+        // Deferred mode is used by the in-process (UE4SS) gateway: the parsed
+        // profile stays in memory and is written by a background thread, so a
+        // request no longer pays for a 3.5 MB parse + serialize + fsync on the
+        // game's own request path. The launcher keeps the synchronous behaviour.
+        readonly object gate = new object();
+        Dictionary<string, object> cached;
+        bool dirty, deferred;
+        Thread flusher;
+        readonly ManualResetEventSlim stopSignal = new ManualResetEventSlim(false);
+        volatile bool stopping;
+        public void EnableDeferredWrites()
+        {
+            lock (gate) { deferred = true; if (flusher == null) { flusher = new Thread(FlushLoop) { IsBackground = true, Name = "kd-profile-flush" }; flusher.Start(); } }
+        }
+        void FlushLoop()
+        {
+            while (!stopping)
+            {
+                if (stopSignal.Wait(250)) break;
+                try { Flush(); } catch (Exception error) { if (Log != null) Log("profile flush failed: " + error.Message); }
+            }
+        }
+        public void Flush()
+        {
+            lock (gate)
+            {
+                if (!dirty || cached == null) return;
+                using (var db = Open()) Save(db, cached);
+                dirty = false;
+            }
+        }
+        public void StopDeferredWrites()
+        {
+            stopping = true; stopSignal.Set();
+            try { Flush(); } catch (Exception error) { if (Log != null) Log("final flush failed: " + error.Message); }
+            Thread thread; lock (gate) { thread = flusher; flusher = null; }
+            if (thread != null && thread.IsAlive) thread.Join(2000);
+        }
+        void Persist(Database db, Dictionary<string, object> state)
+        {
+            if (deferred) { dirty = true; return; }
+            Save(db, state);
+        }
+        // Constructing Performance re-parses the vehicle tables, so keep one
+        // instance instead of building a fresh one for every preset request.
+        Performance balloonPerformance;
+        Performance BalloonPerformance() { return balloonPerformance ?? (balloonPerformance = new Performance(J.S(rankIdentity["accountId"]))); }
         public ProfileStore(string path, Dictionary<string, object> templates)
         {
             Path = path; var login = J.D(J.Read(J.S(templates["PqLogin"])));
@@ -80,7 +128,15 @@ namespace KartDriftLocal
         static void Transaction(Database db, Action action) { db.Query("BEGIN IMMEDIATE"); try { action(); db.Query("COMMIT"); } catch { db.Query("ROLLBACK"); throw; } }
         internal static Dictionary<string, object> Snapshot(Database db) { return J.D(J.Read((string)db.Query("SELECT data FROM profile WHERE id=1")[0][0])); }
         internal static void Save(Database db, Dictionary<string, object> state) { db.Query("UPDATE profile SET data=? WHERE id=1", J.Write(state)); }
-        public Dictionary<string, object> Snapshot() { using (var db = Open()) return Snapshot(db); }
+        public Dictionary<string, object> Snapshot()
+        {
+            if (!deferred) { using (var db = Open()) return Snapshot(db); }
+            lock (gate)
+            {
+                if (cached == null) using (var db = Open()) cached = Snapshot(db);
+                return J.D(J.Copy(cached));
+            }
+        }
         static Dictionary<string, object> CopyMap(object value) { return J.D(J.Copy(value)); }
         static Dictionary<string, object> OptionalMap(Dictionary<string, object> state, string key) { return J.D(J.Get(state, key, J.M())); }
         public List<object> GearValues(string kart, Dictionary<string, object> upgrade, string name)
@@ -112,7 +168,16 @@ namespace KartDriftLocal
         {
             // Work on a private reply too: failed performance validation must not leak mutation notices.
             response = CopyMap(response);
-            using (var db = Open()) Transaction(db, delegate { Apply(db, Snapshot(db), request, response); }); return response;
+            if (!deferred) { using (var db = Open()) Transaction(db, delegate { Apply(db, Snapshot(db), request, response); }); return response; }
+            lock (gate)
+            {
+                using (var db = Open())
+                {
+                    if (cached == null) cached = Snapshot(db);
+                    Apply(db, cached, request, response);
+                }
+                return response;
+            }
         }
         void Apply(Database db, Dictionary<string, object> state, Dictionary<string, object> q, Dictionary<string, object> r)
         {
@@ -190,10 +255,10 @@ namespace KartDriftLocal
                 case "PqTimeAttackRegistReplay": RegisterGhost(db, state, q, r); changed = true; break;
             }
             if ((t == "PqQuickChatUpdate" || t == "PqLoginComplete") && state.ContainsKey("quickChatList")) r["_localProfileNotifications"] = J.L(J.M("_type", "PcQuickChatList", "quickChatList", J.Copy(state["quickChatList"])));
-            if (new[] { "PqLoginComplete", "PqItemPresetOnUpdate", "PqItemPresetLoad", "PqBalloonUpgrade" }.Contains(t)) Notice(r, new Performance(J.S(rankIdentity["accountId"])).BalloonNotice(state));
+            if (new[] { "PqLoginComplete", "PqItemPresetOnUpdate", "PqItemPresetLoad", "PqBalloonUpgrade" }.Contains(t)) Notice(r, BalloonPerformance().BalloonNotice(state));
             if (t == "PqLoginComplete" && J.Truth(J.Get(state, "news"))) { var news = J.Map(state, "news"); Notice(r, J.M("_type", "PcNews", "inserted", news.Keys.ToList(), "insertedValue", news.Values.ToList(), "removed", J.L())); }
             if (Performance != null) Performance.Apply(state, q, r);
-            if (changed) { SyncRankName(state); Save(db, state); }
+            if (changed) { SyncRankName(state); Persist(db, state); }
             Project(db, state, q, r);
         }
         void Gears(Dictionary<string, object> state, Dictionary<string, object> q, Dictionary<string, object> r)

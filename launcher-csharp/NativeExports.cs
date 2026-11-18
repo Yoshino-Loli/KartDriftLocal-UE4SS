@@ -51,6 +51,9 @@ namespace KartDriftLocal
                 var templates = Bundle.Templates();
                 store = new ProfileStore(save, templates);
                 store.Performance = new Performance(J.S(J.D(J.Read(J.S(templates["PqLogin"])))["accountId"]));
+                // The gateway shares this process with the game, so keep the parsed
+                // profile in memory and persist it from a background thread.
+                store.EnableDeferredWrites();
                 // The launcher used to set the culture index before starting the
                 // game; the mod has to do it, otherwise the client keeps whatever
                 // language it saved last (Korean by default).
@@ -127,6 +130,9 @@ namespace KartDriftLocal
         {
             try { if (gateway != null) { gateway.Dispose(); gateway = null; } }
             catch (Exception) { }
+            // Flush the deferred profile before the process goes away.
+            try { if (store != null) { store.StopDeferredWrites(); store = null; } }
+            catch (Exception error) { Log(DefaultData(), "final flush failed: " + error.Message); }
         }
     }
 }

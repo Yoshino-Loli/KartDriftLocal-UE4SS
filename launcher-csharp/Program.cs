@@ -124,7 +124,7 @@ namespace KartDriftLocal
                     var op = J.D(J.Read(line)); string command = J.S(op["op"]); object result;
                     switch (command)
                     {
-                        case "init": store = new ProfileStore(path, op.ContainsKey("templates") ? J.Map(op, "templates") : Bundle.Templates()); result = store.Snapshot(); break;
+                        case "init": store = new ProfileStore(path, op.ContainsKey("templates") ? J.Map(op, "templates") : Bundle.Templates()); if (Environment.GetEnvironmentVariable("KARTDRIFT_DEFERRED") == "1") store.EnableDeferredWrites(); result = store.Snapshot(); break;
                         case "snapshot": result = store.Snapshot(); break;
                         case "apply": store.Performance = J.Truth(J.Get(op, "performance", false)) ? new Performance(J.S(J.Get(op, "account", "LocalTestPlayer"))) : null; result = store.Apply(J.Map(op, "request"), J.Map(op, "response")); break;
                         case "body": result = Convert.ToBase64String(new Performance("LocalTestPlayer").Body(J.S(op["kart"]), J.Map(op, "upgrade"))); break;
@@ -138,6 +138,7 @@ namespace KartDriftLocal
                 }
                 catch (Exception error) { Console.WriteLine(J.Write(J.M("ok", false, "error", error.Message, "kind", error.GetType().Name))); }
             }
+            if (store != null) store.StopDeferredWrites();
         }
     }
 }
