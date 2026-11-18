@@ -129,7 +129,14 @@ namespace KartDriftLocal
         {
             string t = J.S(request["_type"]); if (t == "PqLogin") response["sharedValue"] = Shared;
             if (t == "PqKartGearSet" || t == "PqKartGearReset" || t == "PqKartUpgrade") Payload(state, J.S(request["kartItemId"]));
-            if (PushRequests.Contains(t)) { var push = Payload(state); push["_type"] = "PcKartBodyParamUpdated"; response["_localPerformancePush"] = push; }
+            if (PushRequests.Contains(t))
+            {
+                // Vehicles outside the sampled table (or with an uncollected gear
+                // layout) cannot produce a performance push. The preset change is
+                // still valid, so drop the push instead of failing the request.
+                try { var push = Payload(state); push["_type"] = "PcKartBodyParamUpdated"; response["_localPerformancePush"] = push; }
+                catch (PerformanceUnavailable error) { if (ProfileStore.Log != null) ProfileStore.Log("performance push skipped: " + error.Message); }
+            }
             else if (t == "PqApplySpeedBodyParamForSingleRace") { J.Put(response, Payload(state)); response["_type"] = "PrApplySpeedBodyParamForSingleRace"; response["result"] = J.M("code", 0); response["desc"] = ""; }
             else if (t == "PqTimeAttackStart") Payload(state);
         }

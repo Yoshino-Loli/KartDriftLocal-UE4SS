@@ -18,6 +18,7 @@ namespace KartDriftLocal
         readonly Dictionary<string, object> rankIdentity;
         static readonly string[] LoginFields = ("itemPresetOn itemEquipmentOn itemPresetSlotVector ownKartsUpgradeInfo optionSetting licenseData tutorialData liveryVector liveryStickerVector emblemItemIdOn customProperties crossPlayEnabled autoReady quickMatchData ownCostumeAttrInfo rankMatchTierData balloon riderName").Split(' ');
         static readonly string[] VehicleSlots = "PartBack PartFront PartSide PartHandle PartPlate PartWheel KartAura KartBooster SkidMark".Split(' ');
+        internal static Action<string> Log;
         public ProfileStore(string path, Dictionary<string, object> templates)
         {
             Path = path; var login = J.D(J.Read(J.S(templates["PqLogin"])));
@@ -156,11 +157,24 @@ namespace KartDriftLocal
                 case "PqUpdateCommunicationFavorite": var favorites = J.M(); foreach (string key in "emoticonIds emotionIds quickChatIds".Split(' ')) { J.Need(J.A(q[key]).All(v => v is string), "Invalid communication favorites"); favorites[key] = J.Copy(q[key]); } state["communicationFavorites"] = favorites; r["_type"] = "PrUpdateCommunicationFavorite"; changed = true; break;
                 case "PqChangeCostumeAttrInfo": string costume = J.S(q["costumeId"]), attr = J.S(q["changeAttrName"]); object val = q["changeAttrValue"]; var defaults = J.Map(costumes, "defaults"); J.Need(defaults.ContainsKey(costume), "Unknown costume"); if (attr == "maskCostumeId") J.Need(!J.Truth(val) || defaults.ContainsKey(J.S(val)), "Unknown appearance costume"); else J.Need(J.Map(costumes, "values").ContainsKey(attr) && J.List(J.Map(costumes, "values"), attr).Any(v => J.Same(v, val)), "Unknown costume attribute"); var attrs = J.EnsureMap(state, "ownCostumeAttrInfo"); if (!attrs.ContainsKey(costume)) attrs[costume] = J.Copy(defaults[costume]); J.Map(attrs, costume)[attr] = val; J.Put(r, J.M("_type", "PrChangeCostumeAttrInfo", "costumeId", costume, "changedAttr", attrs[costume])); changed = true; break;
                 case "PqItemPresetOnUpdate":
-                    var preset = CopyMap(q["itemPreset"]); var items = J.Map(preset, "itemMap"); var oldItems = J.Map(J.Map(state, "itemPresetOn"), "itemMap"); object oldKart = J.Get(oldItems, "Kart"), kart = J.Get(items, "Kart"); Remember(state); object saved;
-                    bool resetDefaultWheel = !J.Same(kart, oldKart) && J.Same(J.Get(items, "PartWheel"), J.Get(oldItems, "PartWheel"));
-                    if (!J.Same(kart, oldKart) && kart is string && OptionalMap(state, "vehiclePresets").TryGetValue((string)kart, out saved)) { foreach (string slot in VehicleSlots) items.Remove(slot); J.Put(items, CopyMap(J.Map(J.D(saved), "itemMap"))); preset.Remove("livery"); if (J.D(saved).ContainsKey("livery")) preset["livery"] = J.Copy(J.D(saved)["livery"]); resetDefaultWheel = false; }
-                    var livery = OptionalMap(preset, "livery"); if (J.Truth(J.Get(livery, "liveryUniqueId")) && !J.Same(J.Get(livery, "kartId"), kart)) preset["livery"] = EmptyLivery();
-                    VehicleDefaults.Normalize(preset, resetDefaultWheel: resetDefaultWheel); state["itemPresetOn"] = CopyMap(preset); Remember(state); J.Put(r, J.M("_type", "PrItemPresetOnUpdate", "itemPreset", preset)); changed = true; break;
+                    // The offline server is the only authority, so an unexpected
+                    // preset shape must not block the player. Every step that can
+                    // reject a real client packet is guarded, and the reason is
+                    // logged instead of turning the whole update into code 10001.
+                    var preset = CopyMap(q["itemPreset"]); object saved;
+                    try
+                    {
+                        var items = J.Map(preset, "itemMap"); var oldItems = J.Map(J.Map(state, "itemPresetOn"), "itemMap");
+                        object oldKart = J.Get(oldItems, "Kart"), kart = J.Get(items, "Kart"); Remember(state);
+                        bool resetDefaultWheel = !J.Same(kart, oldKart) && J.Same(J.Get(items, "PartWheel"), J.Get(oldItems, "PartWheel"));
+                        if (!J.Same(kart, oldKart) && kart is string && OptionalMap(state, "vehiclePresets").TryGetValue((string)kart, out saved)) { foreach (string slot in VehicleSlots) items.Remove(slot); J.Put(items, CopyMap(J.Map(J.D(saved), "itemMap"))); preset.Remove("livery"); if (J.D(saved).ContainsKey("livery")) preset["livery"] = J.Copy(J.D(saved)["livery"]); resetDefaultWheel = false; }
+                        var livery = OptionalMap(preset, "livery"); if (J.Truth(J.Get(livery, "liveryUniqueId")) && !J.Same(J.Get(livery, "kartId"), kart)) preset["livery"] = EmptyLivery();
+                        VehicleDefaults.Normalize(preset, resetDefaultWheel: resetDefaultWheel);
+                    }
+                    catch (Exception error) { if (Log != null) Log("preset update normalized with fallback: " + error.GetType().Name + ": " + error.Message); }
+                    state["itemPresetOn"] = CopyMap(preset);
+                    try { Remember(state); } catch (Exception error) { if (Log != null) Log("preset remember failed: " + error.GetType().Name + ": " + error.Message); }
+                    J.Put(r, J.M("_type", "PrItemPresetOnUpdate", "itemPreset", preset)); changed = true; break;
                 case "PqItemEquipmentOnUpdate": var equipment = CopyMap(q["itemEquipment"]); J.Need(equipment.ContainsKey("items"), "Invalid equipment"); state["itemEquipmentOn"] = equipment; J.Put(r, J.M("_type", "PrItemEquipmentOnUpdate", "itemEquipment", equipment)); changed = true; break;
                 case "PqExtendItemPresetSlot": var extend = J.List(state, "itemPresetSlotVector"); if (extend.Count < 100) { extend.Add(J.M("name", "", "itemPreset", J.M())); changed = true; } J.Put(r, J.M("_type", "PrExtendItemPresetSlot", "slotNum", extend.Count)); break;
                 case "PqItemPresetSave": case "PqItemPresetLoad": case "PqItemPresetDelete": case "PqItemPresetUpdateName":

@@ -57,9 +57,24 @@
 
 升级前正常退出游戏和启动器，将新版解压到新目录；备份旧版 `local-data` 后，将其复制到新版启动器同级目录。请保留完整 `TrialTower`、`Localization`、`runtime` 和 `licenses` 文件夹。旧版 Frida 文件无需复制到新目录。
 
+## UE4SS 全自动模式
+
+`build-mod.ps1` 会把启动器逻辑打包成一个 UE4SS mod，装在 `ue4ss\Mods\KartDriftLocal`，之后**双击游戏即可**，不需要启动器：
+
+- `dlls\main.dll`：原生兼容钩子 + 自启动壳
+- `dlls\KartDriftLocal.Core.dll`：网关与存档逻辑，用 NativeAOT 编译成原生共享库（目标机无需 .NET）
+
+mod 加载时会自建状态通道、伪造 Nexon 启动参数、把 `ws://127.0.0.1:59874` 写入 `Game.ini`、在游戏进程内起网关；退出时（`ExitProcess` 或 `TerminateProcess`）按字节还原 `Game.ini` 并删除 journal。游戏被强杀时 journal 保留，下次启动自动还原，因此游戏目录不留残留。
+
+包是自包含的：`Localization`、`TrialTower`、存档（`local-data`）和日志（`logs`）都在 mod 文件夹内，不含写死的绝对路径，整个文件夹可以复制到任意 UE4SS `Mods` 目录直接使用（目录不可写时才回退到 `%LOCALAPPDATA%\KartDriftLocal`）。注意原生钩子依赖本客户端版本的指令签名，换游戏版本会卡在 `native flags` 不再增长。
+
+启动器路径仍然可用，两条路径通过 `KD_LOCAL_NATIVE_CHANNEL` 环境变量区分，互不干扰。
+
 ## 从源码构建
 
-Windows 中运行 `powershell -ExecutionPolicy Bypass -File .\rebuild.ps1 -Tests`，需要 Visual C++ x64、Windows SDK 构建工具和系统 .NET Framework 编译器。依赖源码已附带，构建时校验哈希，无需下载运行库。默认在 `build/client` 生成独立测试目录，可用 `-OutputDirectory <新目录>` 更改输出位置。原目录中的旧程序和 Frida 文件不自动删除。
+启动器已迁移到 .NET 10 并默认使用 NativeAOT 发布：`KartDriftLocal.exe` 是原生单文件（约 4 MB），目标机器无需安装 .NET 运行时。控制台版移除了 Windows Forms 界面，改为命令行选择游戏目录与语言；`--worker`、`--serve-test`、`--core-rpc`、`--check`、`--self-test` 等参数不变。
+
+Windows 中运行 `powershell -ExecutionPolicy Bypass -File .\rebuild.ps1 -Tests`。NativeAOT 需要 Visual C++ x64 工具集与 Windows SDK（提供 `link.exe` 及头文件/库）；若它们不在默认位置，用 `KARTDRIFT_VC_INSTALL`、`KARTDRIFT_WINDOWS_SDK_ROOT` 指向实际安装目录。依赖源码已附带，构建时校验哈希，无需下载运行库。默认在 `build/client` 生成独立测试目录，可用 `-OutputDirectory <新目录>` 更改输出位置；`-SkipNative` 跳过原生模块，`-FrameworkDependent` 改为依赖运行时的单文件发布（体积小，但目标机需装 .NET 10）。原目录中的旧程序和 Frida 文件不自动删除。
 
 运行目录需保留 `KartDriftLocal.exe`、`runtime/KdLocalNative.dll`、`Localization`、`TrialTower`、`licenses` 和第三方声明。`build/native` 为中间产物及测试程序，`LocalData.zip` 已嵌入 EXE，外部副本仅用于构建检查，均不必随运行目录分发。
 

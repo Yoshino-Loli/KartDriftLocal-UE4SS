@@ -34,6 +34,17 @@ namespace KartDriftLocal
             view = mapping.CreateViewAccessor(); view.Write(0, 0x4b444f4e); view.Write(4, 1);
         }
         public void Configure(ProcessStartInfo info) { info.EnvironmentVariables["KD_LOCAL_NATIVE_CHANNEL"] = channel; }
+        // UE4SS loads the module itself (Mods/KartDriftLocal/dlls/main.dll) and
+        // DllMain starts the worker, so no remote thread is created. The module
+        // still needs the owner PID to accept the shared status block.
+        public void Handoff(Process process) { view.Write(8, process.Id); Thread.MemoryBarrier(); }
+        public void WaitReady(Process process, int milliseconds = 20000)
+        {
+            var timer = Stopwatch.StartNew();
+            while (view.ReadInt32(12) == 0 && timer.ElapsedMilliseconds < milliseconds)
+            { ThrowIfFailed(); J.Need(!process.HasExited, "游戏在兼容模块就绪前退出。"); Thread.Sleep(5); }
+            ThrowIfFailed(); J.Need(view.ReadInt32(12) == 1, "原生兼容模块初始化超时，请确认 UE4SS 已加载 KartDriftLocal mod。");
+        }
         public void AttachBeforeResume(Process process)
         {
             view.Write(8, process.Id); Thread.MemoryBarrier();

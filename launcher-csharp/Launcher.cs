@@ -56,13 +56,17 @@ namespace KartDriftLocal
     }
     static partial class Launcher
     {
-        public static readonly string Root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        public static readonly string Root = AppContext.BaseDirectory.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        // Where Localization/TrialTower live. In launcher mode that is Root; a
+        // UE4SS mod overrides it with its own folder via KdLocalSetRoot.
+        public static string DataRoot = Root;
         public static string Config { get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"KartDrift\Saved\Config\WindowsNoEditor\Game.ini"); } }
         public static void AtomicJson(string path, object value)
         { string temp = path + ".tmp"; File.WriteAllText(temp, J.Write(value), new UTF8Encoding(false)); if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path); }
         public static string Hash(string path) { using (var stream = File.OpenRead(path)) using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant(); }
         public static string CheckGame(string path)
         {
+            J.Need(!String.IsNullOrWhiteSpace(path), "没有找到游戏，请选择包含 KartDrift 文件夹的游戏目录。");
             path = System.IO.Path.GetFullPath(path); const string name = "KartDrift-Win64-Shipping.exe";
             string exe = new[] { path, System.IO.Path.Combine(path, @"KartDrift\Binaries\Win64\" + name), System.IO.Path.Combine(path, @"Binaries\Win64\" + name) }.FirstOrDefault(p => File.Exists(p) && System.IO.Path.GetFileName(p).Equals(name, StringComparison.OrdinalIgnoreCase));
             J.Need(exe != null, "没有找到游戏，请选择包含 KartDrift 文件夹的游戏目录。"); var manifest = J.D(J.Read(Bundle.Text("release/manifest.json")));
@@ -101,8 +105,14 @@ namespace KartDriftLocal
                     {
                         try
                         {
-                            adapter.Configure(info); gameProcess = GameProcess.Start(info, adapter.AttachBeforeResume);
-                            log("Owned game PID " + gameProcess.Id + "; native adapter initialized " + J.Write(adapter.Status())); status("正在本地登录…");
+                            // UE4SS loads Mods/KartDriftLocal/dlls/main.dll itself, so the
+                            // launcher only publishes the owner PID instead of creating a
+                            // remote thread. The injected path stays the default fallback.
+                            bool ue4ss = File.Exists(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(exe), "ue4ss", "Mods", "KartDriftLocal", "dlls", "main.dll"));
+                            adapter.Configure(info);
+                            gameProcess = ue4ss ? GameProcess.Start(info) : GameProcess.Start(info, adapter.AttachBeforeResume);
+                            if (ue4ss) { adapter.Handoff(gameProcess); adapter.WaitReady(gameProcess); }
+                            log("Owned game PID " + gameProcess.Id + "; native adapter initialized via " + (ue4ss ? "UE4SS mod" : "injection") + " " + J.Write(adapter.Status())); status("正在本地登录…");
                             bool settled = false; var timer = Stopwatch.StartNew();
                             while (!gameProcess.WaitForExit(250))
                             {

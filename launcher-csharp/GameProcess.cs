@@ -29,7 +29,7 @@ namespace KartDriftLocal
             // Match the proven Python launch exactly: lpApplicationName selects
             // the image; the independent command line starts with KartDrift.
             string block = String.Join("\0", info.EnvironmentVariables.Keys.Cast<string>().OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Select(k => k + "=" + info.EnvironmentVariables[k])) + "\0\0";
-            IntPtr environment = Marshal.StringToHGlobalUni(block); var startup = new StartupInfo(); startup.size = Marshal.SizeOf(typeof(StartupInfo)); var native = new ProcessInfo();
+            IntPtr environment = Marshal.StringToHGlobalUni(block); var startup = new StartupInfo(); startup.size = Marshal.SizeOf<StartupInfo>(); var native = new ProcessInfo();
             Process result = null;
             try
             {

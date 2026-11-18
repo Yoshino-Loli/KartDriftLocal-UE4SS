@@ -7,22 +7,115 @@ using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 
 namespace KartDriftLocal
 {
     static class J
     {
-        static JavaScriptSerializer Serializer() { return new JavaScriptSerializer { MaxJsonLength = 128 * 1024 * 1024, RecursionLimit = 200 }; }
-        public static object Read(string text) { return Normalize(Serializer().DeserializeObject(text)); }
-        static object Normalize(object value)
+        // The original launcher used System.Web.Script.Serialization. That type
+        // does not exist outside .NET Framework, so the wire format is reproduced
+        // on top of System.Text.Json: objects become Dictionary<string, object>,
+        // arrays become List<object>, integral numbers become long, fractional
+        // numbers become decimal, and non-ASCII text is escaped as \uXXXX exactly
+        // like the framework serializer did.
+        public static object Read(string text)
         {
-            var map = value as Dictionary<string, object>;
-            if (map != null) return map.ToDictionary(p => p.Key, p => Normalize(p.Value));
-            var array = value as object[];
-            return array == null ? value : array.Select(Normalize).ToList();
+            using (var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 200 }))
+                return Normalize(document.RootElement);
         }
-        public static string Write(object value) { return Serializer().Serialize(value); }
+        static object Normalize(JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    var map = new Dictionary<string, object>(StringComparer.Ordinal);
+                    foreach (var property in element.EnumerateObject()) map[property.Name] = Normalize(property.Value);
+                    return map;
+                case JsonValueKind.Array:
+                    var list = new List<object>();
+                    foreach (var item in element.EnumerateArray()) list.Add(Normalize(item));
+                    return list;
+                case JsonValueKind.String: return element.GetString();
+                case JsonValueKind.Number:
+                    long integer; if (element.TryGetInt64(out integer)) return integer;
+                    decimal precise; if (element.TryGetDecimal(out precise)) return precise;
+                    return element.GetDouble();
+                case JsonValueKind.True: return true;
+                case JsonValueKind.False: return false;
+                default: return null;
+            }
+        }
+        public static string Write(object value) { var text = new StringBuilder(256); Append(text, value); return text.ToString(); }
+        static void Append(StringBuilder text, object value)
+        {
+            if (value == null) { text.Append("null"); return; }
+            var literal = value as string;
+            if (literal != null) { AppendString(text, literal); return; }
+            if (value is bool) { text.Append((bool)value ? "true" : "false"); return; }
+            if (value is char) { AppendString(text, value.ToString()); return; }
+            var dictionary = value as IDictionary;
+            if (dictionary != null)
+            {
+                text.Append('{'); bool first = true;
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (!first) text.Append(','); first = false;
+                    AppendString(text, Convert.ToString(entry.Key, CultureInfo.InvariantCulture)); text.Append(':'); Append(text, entry.Value);
+                }
+                text.Append('}'); return;
+            }
+            var sequence = value as IEnumerable;
+            if (sequence != null)
+            {
+                text.Append('['); bool first = true;
+                foreach (var item in sequence) { if (!first) text.Append(','); first = false; Append(text, item); }
+                text.Append(']'); return;
+            }
+            switch (Type.GetTypeCode(value.GetType()))
+            {
+                case TypeCode.SByte: case TypeCode.Byte:
+                case TypeCode.Int16: case TypeCode.UInt16:
+                case TypeCode.Int32: case TypeCode.UInt32:
+                case TypeCode.Int64:
+                    text.Append(Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)); return;
+                case TypeCode.UInt64:
+                    text.Append(((ulong)value).ToString(CultureInfo.InvariantCulture)); return;
+                case TypeCode.Decimal:
+                    text.Append(((decimal)value).ToString(CultureInfo.InvariantCulture)); return;
+                case TypeCode.Double:
+                    text.Append(((double)value).ToString("R", CultureInfo.InvariantCulture)); return;
+                case TypeCode.Single:
+                    text.Append(((float)value).ToString("R", CultureInfo.InvariantCulture)); return;
+                default:
+                    AppendString(text, Convert.ToString(value, CultureInfo.InvariantCulture)); return;
+            }
+        }
+        static void AppendString(StringBuilder text, string value)
+        {
+            text.Append('"');
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case '"': text.Append("\\\""); break;
+                    case '\\': text.Append("\\\\"); break;
+                    case '\b': text.Append("\\b"); break;
+                    case '\f': text.Append("\\f"); break;
+                    case '\n': text.Append("\\n"); break;
+                    case '\r': text.Append("\\r"); break;
+                    case '\t': text.Append("\\t"); break;
+                    default:
+                        // Match JavaScriptSerializer: escape control characters,
+                        // markup characters and everything outside printable ASCII.
+                        if (c < ' ' || c > '~' || c == '<' || c == '>' || c == '&' || c == '\'')
+                            text.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        else text.Append(c);
+                        break;
+                }
+            }
+            text.Append('"');
+        }
         public static object Copy(object value) { return Read(Write(value)); }
         public static Dictionary<string, object> D(object value) { var d = value as Dictionary<string, object>; if (d == null) throw new ArgumentException("Expected object"); return d; }
         public static List<object> A(object value) { var a = value as List<object>; if (a == null) throw new ArgumentException("Expected array"); return a; }
@@ -64,10 +157,14 @@ namespace KartDriftLocal
         static Dictionary<string, string> Load()
         {
             var files = new Dictionary<string, string>();
-            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("LocalData.zip"))
-            using (var zip = new ZipArchive(stream, ZipArchiveMode.Read))
-                foreach (var entry in zip.Entries)
-                    using (var reader = new StreamReader(entry.Open(), Encoding.UTF8)) files[entry.FullName] = reader.ReadToEnd();
+            var assembly = Assembly.GetExecutingAssembly();
+            using (var stream = assembly.GetManifestResourceStream("LocalData.zip"))
+            {
+                if (stream == null) throw new InvalidOperationException("LocalData.zip is not embedded; build with rebuild.ps1.");
+                using (var zip = new ZipArchive(stream, ZipArchiveMode.Read))
+                    foreach (var entry in zip.Entries)
+                        using (var reader = new StreamReader(entry.Open(), Encoding.UTF8)) files[entry.FullName] = reader.ReadToEnd();
+            }
             return files;
         }
         public static string Text(string name) { return Files[name]; }

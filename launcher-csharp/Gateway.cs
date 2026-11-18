@@ -24,7 +24,7 @@ namespace KartDriftLocal
         readonly Action<string> log;
         public Gateway(ProfileStore profile, int port, Action<string> logger)
         {
-            store = profile; log = logger; templates = Bundle.Templates();
+            store = profile; log = logger; templates = Bundle.Templates(); ProfileStore.Log = logger;
             listener = new TcpListener(IPAddress.Loopback, port); ping = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             try { listener.Start(16); } catch { ping.Close(); throw; }
             ThreadPool.QueueUserWorkItem(delegate { Accept(); }); ThreadPool.QueueUserWorkItem(delegate { Echo(); });

@@ -239,13 +239,24 @@ DWORD WINAPI Worker(void*) {
     wchar_t name[180]{}; if (!GetEnvironmentVariableW(L"KD_LOCAL_NATIVE_CHANNEL", name, 180)) return 0;
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name); if (!mapping) return 1;
     status = static_cast<NativeStatus*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
-    if (!status || status->magic != kMagic || status->version != 1 || status->ownerPid != GetCurrentProcessId()) return 2;
+    if (!status || status->magic != kMagic || status->version != 1) return 2;
+    // When UE4SS loads this module the launcher only learns the game PID after
+    // CreateProcess returns, so give it a moment to publish the owner PID
+    // instead of racing it. The injected path writes the PID before resuming.
+    for (int i = 0; i < 10000 && status->ownerPid != GetCurrentProcessId(); ++i) Sleep(1);
+    if (status->ownerPid != GetCurrentProcessId()) return 2;
     game = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
     sdkModule = GetModuleHandleW(L"nexon_api_x64.dll"); if (sdkModule) sdkEpoch = 1;
     analyticsModule = GetModuleHandleW(L"nexonanalytics64.dll"); if (analyticsModule) analyticsEpoch = 1;
     cryptoModule = GetModuleHandleW(L"bcrypt.dll");
     auto registerNotify = reinterpret_cast<Notify>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "LdrRegisterDllNotification"));
-    if (!registerNotify || MH_Initialize() != MH_OK || registerNotify(0, ModuleChanged, nullptr, &notificationCookie) != 0) { Fail(100); return 3; }
+    if (!registerNotify) { Fail(100); return 3; }
+    // autostart.cpp initializes MinHook from its own thread when UE4SS loads us.
+    HANDLE lock = CreateMutexW(nullptr, FALSE, L"Local\\KdLocalMinHookInit");
+    if (lock) WaitForSingleObject(lock, 15000);
+    MH_STATUS hookStatus = MH_Initialize();
+    if (lock) { ReleaseMutex(lock); CloseHandle(lock); }
+    if ((hookStatus != MH_OK && hookStatus != MH_ERROR_ALREADY_INITIALIZED) || registerNotify(0, ModuleChanged, nullptr, &notificationCookie) != 0) { Fail(100); return 3; }
     for (;;) {
         if (status->error) return 4;
         if (sdkEpoch != doneSdk) {
@@ -311,11 +322,16 @@ extern "C" int ShouldBlockNotice(void* caller, void* notice) {
     return 0;
 }
 #ifndef KD_NATIVE_TEST
-BOOL WINAPI DllMain(HINSTANCE, DWORD reason, void*) {
+extern "C" void KdAutoStartModule(HMODULE module);
+extern "C" void KdAutoStartRestore();
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, void*) {
     if (reason == DLL_PROCESS_ATTACH) {
+        KdAutoStartModule(module);
         HANDLE worker = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
         if (!worker) return FALSE;
         CloseHandle(worker);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        KdAutoStartRestore();
     }
     return TRUE;
 }

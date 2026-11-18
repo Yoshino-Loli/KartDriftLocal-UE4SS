@@ -7,15 +7,14 @@ namespace KartDriftLocal
 {
     static class Program
     {
-        [STAThread]
         static int Main(string[] args)
         {
             try
             {
+                try { Console.OutputEncoding = new UTF8Encoding(false); } catch (IOException) { } catch (PlatformNotSupportedException) { }
                 if (args.Length > 0)
                 {
-                    // GUI executables have no console code page. Bind inherited
-                    // test/worker pipes directly instead of SetConsoleCP.
+                    // Bind inherited test/worker pipes directly instead of SetConsoleCP.
                     Console.SetIn(new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false)));
                     Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
                     Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
@@ -28,13 +27,14 @@ namespace KartDriftLocal
                     var result = J.D(J.Read(File.ReadAllText(args[1], Encoding.UTF8))); J.Need(J.S(result["command"]).StartsWith("KartDrift ", StringComparison.Ordinal), "Launch contract differs: argv[0] must be KartDrift"); J.Need(J.S(result["marker"]) == "中文环境检查", "Child environment changed"); return 0;
                 }
                 if (args.Length == 2 && args[0] == "--core-rpc") { Rpc(args[1]); return 0; }
-                if (args.Length == 2 && args[0] == "--ui-preview") { Launcher.PreviewUi(args[1]); return 0; }
+                if (args.Length == 2 && args[0] == "--ui-preview") { Console.Error.WriteLine("The console build has no window to preview; the launcher UI was removed."); return 2; }
                 if (args.Length == 2 && args[0] == "--self-test") { SelfTest(args[1]); return 0; }
                 if (args.Length == 3 && args[0] == "--serve-test")
                 { var store = new ProfileStore(args[1], Bundle.Templates()); store.Performance = new Performance(J.S(J.D(J.Read(J.S(Bundle.Templates()["PqLogin"])))["accountId"])); using (var gateway = new Gateway(store, Int32.Parse(args[2]), message => Console.Error.WriteLine(message))) { Console.WriteLine(J.Write(J.M("port", gateway.Port, "pingPort", gateway.PingPort))); Console.Out.Flush(); Console.ReadLine(); } return 0; }
                 if (args.Length == 4 && args[0] == "--native-sdk-check") { SdkTest(args[1], args[2], args[3]); return 0; }
                 if (args.Length >= 1 && (args[0] == "--worker" || args[0] == "--smoke-test")) { J.Need(args.Length == 3 || args.Length == 4, "Expected game, data directory and optional culture"); if (args[0] == "--smoke-test") SmokeTest(args[1], args[2], args.Length == 4 ? args[3] : "zh-Hans"); else Launcher.Run(args[1], args[2], false, message => Console.WriteLine(message), args.Length == 4 ? args[3] : "zh-Hans"); return 0; }
                 if (args.Length == 2 && args[0] == "--check") { Console.WriteLine(J.Write(J.M("game", Launcher.CheckGame(args[1]), "runtime", Launcher.CheckRuntime()))); return 0; }
+                if (args.Length == 1 && args[0] == "--select") { Launcher.Ui(true); return 0; }
                 if (args.Length != 0) throw new ArgumentException("Unknown command"); Launcher.Ui(); return 0;
             }
             catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -64,7 +64,7 @@ namespace KartDriftLocal
                 foreach (var value in J.Map(state, "ownKartsUpgradeInfo").Values) J.Need(J.I(J.Map(J.D(value), "gearInfo")["totalGearCount"]) == 51, "Gear budget failed");
                 var perf = new Performance(J.S(J.D(J.Read(J.S(templates["PqLogin"])))["accountId"])); perf.Payload(state);
                 string text = "便携 C# 中文检查"; J.Need(Codec.Decode(Codec.Encode(text)) == text, "Protocol codec failed");
-                using (var label = new System.Windows.Forms.Label { Text = text }) J.Need(label.Text == text, "Windows Forms dependency failed");
+                var utf8 = new UTF8Encoding(false); J.Need(utf8.GetString(utf8.GetBytes(text)) == text, "UTF-8 text round-trip failed");
                 string config = Path.Combine(directory, "Game.ini"); byte[] original = Encoding.UTF8.GetBytes("; 配置原文\r\n[User]\r\nValue=1\r\n"); File.WriteAllBytes(config, original);
                 using (var route = new LocalRoute(config, directory)) J.Need(File.ReadAllText(config).Contains("\r\nServerAddrs="), "Route installation failed");
                 J.Need(Convert.ToBase64String(File.ReadAllBytes(config)) == Convert.ToBase64String(original), "Route byte restoration failed");

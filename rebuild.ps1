@@ -1,13 +1,16 @@
-param([string] $OutputDirectory = (Join-Path $PSScriptRoot 'build/client'), [switch] $Tests)
+param(
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot 'build/client'),
+    [switch] $Tests,
+    [switch] $SkipNative,
+    [switch] $FrameworkDependent)
 $ErrorActionPreference = 'Stop'
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $nativeOutput = Join-Path $PSScriptRoot 'build/native'
-& (Join-Path $PSScriptRoot 'native/build.ps1') -OutputDirectory $nativeOutput -Tests:$Tests
+if (-not $SkipNative) { & (Join-Path $PSScriptRoot 'native/build.ps1') -OutputDirectory $nativeOutput -Tests:$Tests }
 $runtime = Join-Path $output 'runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 Copy-Item -LiteralPath (Join-Path $nativeOutput 'KdLocalNative.dll') -Destination $runtime -Force
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 Add-Type -AssemblyName System.IO.Compression
 $bundle = Join-Path $output 'LocalData.zip'
@@ -30,14 +33,32 @@ try {
         }
     }
 } finally { $archive.Dispose() }
-$compileArgs = @('/nologo','/target:winexe','/platform:x64','/optimize+','/codepage:65001',
- '/r:System.Web.Extensions.dll','/r:System.IO.Compression.dll','/r:System.IO.Compression.FileSystem.dll',
- '/r:System.Windows.Forms.dll','/r:System.Drawing.dll',
- ('/out:' + (Join-Path $output 'KartDriftLocal.exe')),
- ('/resource:' + $bundle + ',LocalData.zip'))
-$compileArgs += @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'launcher-csharp') -Filter '*.cs' | ForEach-Object { $_.FullName })
-& $compiler @compileArgs
-if ($LASTEXITCODE -ne 0) { throw 'C# compile failed' }
+
+# NativeAOT needs link.exe from MSVC plus the Windows SDK headers and libraries.
+# vcvars is not used so the build also works when Visual Studio lives off the
+# default drive; KARTDRIFT_VC_INSTALL / KARTDRIFT_WINDOWS_SDK_ROOT override it.
+if (-not $FrameworkDependent) {
+    $vs = $env:KARTDRIFT_VC_INSTALL
+    if (-not $vs) {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+        $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    }
+    if (-not $vs) { throw 'NativeAOT needs Visual C++ x64 build tools. Set KARTDRIFT_VC_INSTALL or pass -FrameworkDependent.' }
+    $vc = (Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+    $sdkRoot = $env:KARTDRIFT_WINDOWS_SDK_ROOT
+    if (-not $sdkRoot) { $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10' }
+    if (-not (Test-Path -LiteralPath (Join-Path $sdkRoot 'Include'))) { throw ('Windows SDK not found: ' + $sdkRoot + '. Set KARTDRIFT_WINDOWS_SDK_ROOT.') }
+    $sdk = (Get-ChildItem (Join-Path $sdkRoot 'Include') -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+    $env:PATH = (@((Join-Path $vc 'bin/Hostx64/x64'), (Join-Path $sdkRoot ('bin/' + $sdk + '/x64'))) + $env:PATH) -join ';'
+    $env:INCLUDE = (@((Join-Path $vc 'include')) + @('ucrt','shared','um','winrt') | ForEach-Object { if ($_ -match '^(ucrt|shared|um|winrt)$') { Join-Path $sdkRoot ('Include/' + $sdk + '/' + $_) } else { $_ } }) -join ';'
+    $env:LIB = (@((Join-Path $vc 'lib/x64')) + @((Join-Path $sdkRoot ('Lib/' + $sdk + '/ucrt/x64')), (Join-Path $sdkRoot ('Lib/' + $sdk + '/um/x64')))) -join ';'
+}
+
+$publish = @('-c','Release','-r','win-x64','--nologo','-o',$output,('-p:LocalDataBundle=' + $bundle))
+if ($FrameworkDependent) { $publish += @('-p:PublishSingleFile=true','-p:SelfContained=false') } else { $publish += '-p:PublishAot=true' }
+& dotnet publish (Join-Path $PSScriptRoot 'launcher-csharp/KartDriftLocal.csproj') @publish
+if ($LASTEXITCODE -ne 0) { throw 'C# publish failed' }
+if (-not (Test-Path -LiteralPath (Join-Path $output 'KartDriftLocal.exe'))) { throw 'KartDriftLocal.exe was not produced' }
 if ($output.TrimEnd('\') -ne $PSScriptRoot.TrimEnd('\')) {
     foreach ($name in @('Localization','TrialTower')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $output -Recurse -Force }
 }

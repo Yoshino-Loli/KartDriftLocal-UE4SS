@@ -13,7 +13,7 @@ namespace KartDriftLocal
         {
             content = null; object definition;
             if (!Files.TryGetValue(name, out definition)) return 404;
-            string path = Path.Combine(Launcher.Root, "TrialTower", name);
+            string path = Path.Combine(Launcher.DataRoot, "TrialTower", name);
             if (!File.Exists(path)) return 404;
             var expected = J.D(definition); byte[] data = File.ReadAllBytes(path);
             if (data.Length != J.I(expected["bytes"]) || data.Length < 4 || data[0] != 71 || data[1] != 86 || data[2] != 65 || data[3] != 83) return 409;
