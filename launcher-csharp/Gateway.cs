@@ -97,11 +97,15 @@ namespace KartDriftLocal
                 J.Need(size <= 128 * 1024 * 1024, "WebSocket frame too large"); byte[] mask = (h[1] & 128) != 0 ? Exact(stream, 4) : null, data = Exact(stream, (int)size); if (mask != null) for (int i = 0; i < data.Length; i++) data[i] ^= mask[i % 4];
                 if (op == 8) { Frame(stream, 8, data); return; } if (op == 9) { Frame(stream, 10, data); continue; } if (op != 1) continue;
                 string plain; try { plain = Codec.Decode(Encoding.ASCII.GetString(data)); } catch (CryptographicException) { continue; } catch (FormatException) { continue; }
+                long started = Environment.TickCount64;
                 int end = plain.LastIndexOf('}'); var q = J.D(J.Read(end < 0 ? plain : plain.Substring(0, end + 1))); var notifications = J.L(); var reply = Answer(q, notifications);
                 if (!bannerSent && J.S(q["_type"]) == "PqLoginComplete" && J.Same(J.Map(reply, "result")["code"], 0)) { notifications.Add(StartupBanner.Create()); bannerSent = true; }
                 Send(stream, reply); foreach (var notice in notifications) Send(stream, notice);
                 if (J.S(q["_type"]) == "PqLoginComplete" && J.Same(J.Map(reply, "result")["code"], 0)) LoginComplete = true;
-                log(J.S(q["_type"]) + " -> " + J.S(reply["_type"]) + " code=" + J.Map(reply, "result")["code"]);
+                var code = J.Map(reply, "result")["code"];
+                log(J.S(q["_type"]) + " -> " + J.S(reply["_type"]) + " code=" + code
+                    + (J.I(code) != 0 ? " " + J.S(J.Get(J.Map(reply, "result"), "desc", "")) : "")
+                    + " (" + (Environment.TickCount64 - started) + "ms)");
             }
         }
         public Dictionary<string, object> Answer(Dictionary<string, object> q, List<object> notifications)
@@ -118,6 +122,9 @@ namespace KartDriftLocal
             catch (Exception error)
             {
                 if (!(error is ArgumentException || error is KeyNotFoundException || error is InvalidOperationException || error is OverflowException)) throw;
+                log("rejected " + t + ": " + error.GetType().Name + ": " + error.Message);
+                if (t == "PqItemPresetOnUpdate" || t == "PqItemEquipmentOnUpdate")
+                { string packet = J.Write(q); log("packet " + t + ": " + packet.Substring(0, Math.Min(3000, packet.Length))); }
                 notifications.Clear(); bool typed = error is PerformanceUnavailable || new[] { "PqKartUpgrade", "PqKartGearSet", "PqKartGearReset", "PqCheckString", "PqLicenseStart", "PqTimeAttackUpdate", "PqRiderNameChangeInfo", "PqRiderNameChangeReserve", "PqRiderNameChangeConfirm", "PqRiderNameChangeReserveCancel", "PqRiderNameDuplicateCheck", "PqSetRiderName" }.Contains(t);
                 return J.M("_type", typed ? "Pr" + t.Substring(2) : "PrPacket", "reqId", J.Get(q, "reqId"), "result", J.M("code", 10001), "desc", error is PerformanceUnavailable ? error.Message : "Local operation unavailable or invalid");
             }

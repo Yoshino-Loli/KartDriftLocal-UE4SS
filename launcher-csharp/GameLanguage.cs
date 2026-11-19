@@ -68,9 +68,12 @@ namespace KartDriftLocal
         {
             GameLanguage.Index(culture);
             using (var db = Open()) Transaction(db, delegate {
-                var state = Snapshot(db); var options = J.Map(J.Map(state, "optionSetting"), "gameOptions");
-                options["DriveAssistOption"] = GameLanguage.Option(J.S(J.Get(options, "DriveAssistOption", "")), culture);
-                Save(db, state);
+                lock (gate)
+                {
+                    var state = State(db); var options = J.Map(J.Map(state, "optionSetting"), "gameOptions");
+                    options["DriveAssistOption"] = GameLanguage.Option(J.S(J.Get(options, "DriveAssistOption", "")), culture);
+                    Persist(db, state);
+                }
             });
         }
     }

@@ -30,6 +30,7 @@ namespace KartDriftLocal
         Thread flusher;
         readonly ManualResetEventSlim stopSignal = new ManualResetEventSlim(false);
         volatile bool stopping;
+        long lastActivity, lastFlush;
         public void EnableDeferredWrites()
         {
             lock (gate) { deferred = true; if (flusher == null) { flusher = new Thread(FlushLoop) { IsBackground = true, Name = "kd-profile-flush" }; flusher.Start(); } }
@@ -38,18 +39,31 @@ namespace KartDriftLocal
         {
             while (!stopping)
             {
-                if (stopSignal.Wait(250)) break;
+                if (stopSignal.Wait(100)) break;
+                // Serializing 3.5 MB holds the profile lock, so only do it once the
+                // game has been quiet for a moment: a flush must never block a
+                // request the player is waiting on. The 5 s cap keeps data fresh
+                // even during continuous activity.
+                long now = Environment.TickCount64;
+                bool idle = now - Volatile.Read(ref lastActivity) >= 400;
+                bool overdue = now - Volatile.Read(ref lastFlush) >= 5000;
+                if (!idle && !overdue) continue;
                 try { Flush(); } catch (Exception error) { if (Log != null) Log("profile flush failed: " + error.Message); }
             }
         }
         public void Flush()
         {
+            string payload;
             lock (gate)
             {
                 if (!dirty || cached == null) return;
-                using (var db = Open()) Save(db, cached);
+                // Serialize under the lock, write outside it: the writer must never
+                // hold the profile lock while owning a database transaction.
+                payload = J.Write(cached);
                 dirty = false;
             }
+            using (var db = Open()) db.Query("UPDATE profile SET data=? WHERE id=1", payload);
+            Volatile.Write(ref lastFlush, Environment.TickCount64);
         }
         public void StopDeferredWrites()
         {
@@ -60,8 +74,16 @@ namespace KartDriftLocal
         }
         void Persist(Database db, Dictionary<string, object> state)
         {
-            if (deferred) { dirty = true; return; }
+            if (deferred) { dirty = true; Volatile.Write(ref lastActivity, Environment.TickCount64); return; }
             Save(db, state);
+        }
+        // Read-modify-write paths outside Apply() must reuse the cached profile
+        // too, otherwise a sticker or costume change re-parses 3.5 MB.
+        Dictionary<string, object> State(Database db)
+        {
+            if (!deferred) return Snapshot(db);
+            if (cached == null) cached = Snapshot(db);
+            return cached;
         }
         // Constructing Performance re-parses the vehicle tables, so keep one
         // instance instead of building a fresh one for every preset request.
@@ -171,6 +193,7 @@ namespace KartDriftLocal
             if (!deferred) { using (var db = Open()) Transaction(db, delegate { Apply(db, Snapshot(db), request, response); }); return response; }
             lock (gate)
             {
+                Volatile.Write(ref lastActivity, Environment.TickCount64);
                 using (var db = Open())
                 {
                     if (cached == null) cached = Snapshot(db);

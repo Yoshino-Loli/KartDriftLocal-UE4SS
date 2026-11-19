@@ -42,7 +42,7 @@ namespace KartDriftLocal
                     try { var envelope = J.D(J.Read(new UTF8Encoding(false, true).GetString(content))); var request = OptionalMap(envelope, "Request"); if (!J.Same(J.Get(request, "key"), key) || !(J.Get(request, "value") is Dictionary<string, object>)) { status = 400; return; } }
                     catch (ArgumentException) { status = 400; return; } catch (InvalidOperationException) { status = 400; return; }
                 }
-                if (kind == "sticker") { var state = Snapshot(db); var value = J.Map(J.D(J.Read((string)row[2])), "sticker"); var entries = J.List(state, "liveryStickerVector"); entries.RemoveAll(v => J.Same(J.D(v)["liveryStickerId"], value["liveryStickerId"])); entries.Add(value); Save(db, state); }
+                if (kind == "sticker") { lock (gate) { var state = State(db); var value = J.Map(J.D(J.Read((string)row[2])), "sticker"); var entries = J.List(state, "liveryStickerVector"); entries.RemoveAll(v => J.Same(J.D(v)["liveryStickerId"], value["liveryStickerId"])); entries.Add(value); Persist(db, state); } }
                 db.Query("UPDATE assets SET data=? WHERE key=?", content, key);
             }); return status;
         }
